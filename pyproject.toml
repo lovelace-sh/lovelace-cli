@@ -31,6 +31,7 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "cryptography>=41.0.0",
     "packaging>=21.0",
+    "inquirer>=3.1.0",
 ]
 
 [project.scripts]
@@ -47,3 +48,6 @@ packages = ["lovelace"]
 
 [tool.setuptools.package-data]
 lovelace = ["py.typed"]
+
+[tool.setuptools.package-dir]
+"" = "."
