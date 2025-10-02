@@ -17,6 +17,7 @@ class WebSocketWatcher:
     def __init__(self, config: Dict[str, str], sync_handler: R2Sync):
         self.websocket_url = config.get("websocket_url")
         self.token = config.get("token")
+        self.project_id = config.get("project_id")
         self.sync_handler = sync_handler
         self.ws_app: Optional[WebSocketApp] = None
         self.running = False
@@ -25,7 +26,6 @@ class WebSocketWatcher:
         self.last_activity = datetime.now()
         self.hibernation_timeout = 30
         self.ping_interval = 25
-        self.ping_thread: Optional[threading.Thread] = None
         
     def _on_open(self, ws):
         logger.info("WebSocket connection established")
@@ -40,24 +40,7 @@ class WebSocketWatcher:
             "projectId": project_id
         })
         ws.send(auth_message)
-        
-        if self.ping_thread and self.ping_thread.is_alive():
-            self.ping_thread.join()
-        
-        self.ping_thread = threading.Thread(target=self._ping_loop, args=(ws,))
-        self.ping_thread.daemon = True
-        self.ping_thread.start()
     
-    def _ping_loop(self, ws):
-        while self.running:
-            time.sleep(self.ping_interval)
-            if self.running and ws.sock and ws.sock.connected:
-                try:
-                    ws.send(json.dumps({"type": "ping"}))
-                    logger.debug("Sent ping")
-                except Exception as e:
-                    logger.error(f"Failed to send ping: {e}")
-                    break
     
     def _on_message(self, ws, message):
         try:
@@ -194,16 +177,13 @@ class WebSocketWatcher:
         try:
             # Construct the WebSocket URL for the API gateway
             # The API gateway expects the format: wss://domain/api/cli/sync/{projectId}
-            project_id = self.sync_handler.prefix.split('/')[1] if '/' in self.sync_handler.prefix else self.sync_handler.prefix
-            websocket_url = f"{self.websocket_url}/api/cli/sync/{project_id}"
+            websocket_url = f"{self.websocket_url}/api/cli/sync/{self.project_id}"
             
             logger.info(f"Connecting to WebSocket: {websocket_url}")
             
             # Set up headers for authentication
             headers = {
-                'Authorization': f'Bearer {self.token}',
-                'Upgrade': 'websocket',
-                'Connection': 'Upgrade'
+                'Authorization': f'Bearer {self.token}'
             }
             
             self.ws_app = WebSocketApp(
@@ -215,13 +195,35 @@ class WebSocketWatcher:
                 on_close=self._on_close
             )
             
-            wst = threading.Thread(target=self.ws_app.run_forever)
+            # Run the WebSocket connection with proper parameters for upgrade handling
+            wst = threading.Thread(target=self._run_websocket)
             wst.daemon = True
             wst.start()
             
         except Exception as e:
             logger.error(f"Failed to establish WebSocket connection: {e}")
             raise WatchError(f"WebSocket connection failed: {e}")
+    
+    def _run_websocket(self):
+        """Run the WebSocket connection with proper error handling"""
+        try:
+            # Use run_forever with ping_interval and ping_timeout for better connection handling
+            # Also include origin and host headers for proper WebSocket upgrade
+            self.ws_app.run_forever(
+                ping_interval=self.ping_interval,
+                ping_timeout=10,
+                ping_payload='{"type": "ping"}',
+                origin=None,  # Let the library handle origin
+                host=None     # Let the library handle host
+            )
+        except Exception as e:
+            logger.error(f"WebSocket connection error: {e}")
+            if self.running:
+                # Attempt to reconnect if we're still supposed to be running
+                logger.info("Attempting to reconnect...")
+                time.sleep(self.reconnect_delay)
+                if self.running:
+                    self._connect()
     
     def start(self):
         if self.running:
@@ -247,8 +249,5 @@ class WebSocketWatcher:
         if self.ws_app:
             self.ws_app.close()
             self.ws_app = None
-        
-        if self.ping_thread and self.ping_thread.is_alive():
-            self.ping_thread.join(timeout=5)
         
         logger.info("File watcher stopped")
