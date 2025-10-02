@@ -33,11 +33,11 @@ class WebSocketWatcher:
         
         # Send authentication message to API gateway
         # The API gateway expects projectId in the auth message
-        project_id = self.sync_handler.prefix.split('/')[1] if '/' in self.sync_handler.prefix else self.sync_handler.prefix
+        # Use the project_id from config, not from parsing the prefix
         auth_message = json.dumps({
             "type": "auth",
             "token": self.token,
-            "projectId": project_id
+            "projectId": self.project_id
         })
         ws.send(auth_message)
     
@@ -90,7 +90,7 @@ class WebSocketWatcher:
             elif msg_type == "auth_error":
                 logger.error(f"Authentication error: {data.get('message')}")
                 # Close connection on auth error
-                ws.close(1008, "Authentication failed")
+                ws.close()
                 
             elif msg_type == "hibernating":
                 logger.info(f"Server hibernating: {data.get('message')}")
@@ -181,14 +181,11 @@ class WebSocketWatcher:
             
             logger.info(f"Connecting to WebSocket: {websocket_url}")
             
-            # Set up headers for authentication
-            headers = {
-                'Authorization': f'Bearer {self.token}'
-            }
+            # The websocket-client library handles WebSocket upgrade headers automatically
+            # No need to manually set Upgrade, Connection, or Sec-WebSocket headers
             
             self.ws_app = WebSocketApp(
                 websocket_url,
-                header=headers,
                 on_open=self._on_open,
                 on_message=self._on_message,
                 on_error=self._on_error,
