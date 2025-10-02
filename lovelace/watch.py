@@ -31,9 +31,13 @@ class WebSocketWatcher:
         logger.info("WebSocket connection established")
         self.reconnect_delay = 5
         
+        # Send authentication message to API gateway
+        # The API gateway expects projectId in the auth message
+        project_id = self.sync_handler.prefix.split('/')[1] if '/' in self.sync_handler.prefix else self.sync_handler.prefix
         auth_message = json.dumps({
             "type": "auth",
-            "token": self.token
+            "token": self.token,
+            "projectId": project_id
         })
         ws.send(auth_message)
         
@@ -81,11 +85,33 @@ class WebSocketWatcher:
                 elif change_type == "delete":
                     self._handle_file_delete(file_path)
                     
+            elif msg_type == "pending_changes":
+                changes = data.get("changes", [])
+                logger.info(f"Received {len(changes)} pending changes")
+                
+                for change in changes:
+                    file_path = change.get("path")
+                    change_type = change.get("event")
+                    
+                    if change_type in ["created", "updated"]:
+                        self._handle_file_update(file_path)
+                    elif change_type == "deleted":
+                        self._handle_file_delete(file_path)
+                    
             elif msg_type == "pong":
                 logger.debug("Received pong")
                 
             elif msg_type == "error":
                 logger.error(f"Server error: {data.get('message')}")
+                
+            elif msg_type == "auth_error":
+                logger.error(f"Authentication error: {data.get('message')}")
+                # Close connection on auth error
+                ws.close(1008, "Authentication failed")
+                
+            elif msg_type == "hibernating":
+                logger.info(f"Server hibernating: {data.get('message')}")
+                # Server is hibernating, we'll reconnect when needed
                 
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse message: {e}")
@@ -166,8 +192,23 @@ class WebSocketWatcher:
     
     def _connect(self):
         try:
+            # Construct the WebSocket URL for the API gateway
+            # The API gateway expects the format: wss://domain/api/cli/sync/{projectId}
+            project_id = self.sync_handler.prefix.split('/')[1] if '/' in self.sync_handler.prefix else self.sync_handler.prefix
+            websocket_url = f"{self.websocket_url}/api/cli/sync/{project_id}"
+            
+            logger.info(f"Connecting to WebSocket: {websocket_url}")
+            
+            # Set up headers for authentication
+            headers = {
+                'Authorization': f'Bearer {self.token}',
+                'Upgrade': 'websocket',
+                'Connection': 'Upgrade'
+            }
+            
             self.ws_app = WebSocketApp(
-                self.websocket_url,
+                websocket_url,
+                header=headers,
                 on_open=self._on_open,
                 on_message=self._on_message,
                 on_error=self._on_error,
