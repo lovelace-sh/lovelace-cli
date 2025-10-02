@@ -51,8 +51,9 @@ class WebSocketWatcher:
             if msg_type == "auth_success":
                 logger.info("Authentication successful")
                 
-                restore_message = json.dumps({"type": "restore_state"})
-                ws.send(restore_message)
+                # Skip restore_state for now to avoid server error
+                # restore_message = json.dumps({"type": "restore_state"})
+                # ws.send(restore_message)
                 
             elif msg_type == "state_restored":
                 logger.info(f"State restored: {data.get('state', {})}")
@@ -95,6 +96,12 @@ class WebSocketWatcher:
             elif msg_type == "hibernating":
                 logger.info(f"Server hibernating: {data.get('message')}")
                 # Server is hibernating, we'll reconnect when needed
+                
+            else:
+                # Handle unknown message types
+                logger.warning(f"Unknown message type received: {msg_type}")
+                logger.warning(f"Full message: {message}")
+                logger.warning(f"Message data: {data}")
                 
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse message: {e}")
@@ -157,19 +164,21 @@ class WebSocketWatcher:
     
     def _save_state(self, ws):
         try:
-            state = {
-                "last_sync": self.last_activity.isoformat(),
-                "prefix": self.sync_handler.prefix
-            }
+            # Skip save_state for now to avoid server error
+            # state = {
+            #     "last_sync": self.last_activity.isoformat(),
+            #     "prefix": self.sync_handler.prefix
+            # }
             
-            save_message = json.dumps({
-                "type": "save_state",
-                "state": state
-            })
+            # save_message = json.dumps({
+            #     "type": "save_state",
+            #     "state": state
+            # })
             
-            if ws.sock and ws.sock.connected:
-                ws.send(save_message)
-                logger.info("Saved state for hibernation")
+            # if ws.sock and ws.sock.connected:
+            #     ws.send(save_message)
+            #     logger.info("Saved state for hibernation")
+            logger.info("Skipping state save to avoid server error")
         except Exception as e:
             logger.error(f"Failed to save state: {e}")
     
