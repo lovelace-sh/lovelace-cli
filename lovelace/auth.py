@@ -1,3 +1,4 @@
+import click
 import requests
 import json
 import platform
@@ -171,19 +172,23 @@ class AuthClient:
         try:
             response = requests.post(
                 "https://dev.api.lovelace.sh/api/cli/auth/validate",
-                json={"token": token},
-                headers={"Content-Type": "application/json"},
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json"
+                },
                 timeout=10
             )
             if response.status_code == 200:
                 data = response.json()
-                return {
-                    "valid": True,
-                    "prefix": data.get("prefix"),
-                    "bucket": data.get("bucket"),
-                    "endpoint_url": data.get("endpoint_url"),
-                    "websocket_url": data.get("websocket_url")
-                }
+                click.echo(f"response: {data}")
+                if data.get("success") and data.get("data", {}).get("valid"):
+                    return {
+                        "valid": True,
+                        "user_id": data.get("data", {}).get("user_id"),
+                        "project_id": data.get("data", {}).get("project_id"),
+                        "device_id": data.get("data", {}).get("device_id"),
+                        "project_dir": data.get("data", {}).get("project_dir")
+                    }
             return {"valid": False}
         except requests.RequestException:
             return {"valid": False}
