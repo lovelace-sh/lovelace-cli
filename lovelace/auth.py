@@ -180,7 +180,6 @@ class AuthClient:
             )
             if response.status_code == 200:
                 data = response.json()
-                click.echo(f"response: {data}")
                 if data.get("success") and data.get("data", {}).get("valid"):
                     return {
                         "valid": True,

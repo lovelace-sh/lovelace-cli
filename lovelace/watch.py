@@ -110,7 +110,9 @@ class WebSocketWatcher:
     
     def _handle_file_update(self, file_path: str):
         try:
-            remote_key = f"{self.sync_handler.prefix}/{file_path}".lstrip('/')
+            # Ensure we don't create double slashes when prefix already ends with /
+            prefix = self.sync_handler.prefix.rstrip('/')
+            remote_key = f"{prefix}/{file_path}".lstrip('/')
             local_path = self.sync_handler.local_root / file_path
             
             success = self.sync_handler._download_file(remote_key, local_path)
