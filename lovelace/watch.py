@@ -110,9 +110,16 @@ class WebSocketWatcher:
     
     def _handle_file_update(self, file_path: str):
         try:
-            # Ensure we don't create double slashes when prefix already ends with /
-            prefix = self.sync_handler.prefix.rstrip('/')
-            remote_key = f"{prefix}/{file_path}".lstrip('/')
+            # Construct the remote key the same way the sync command does
+            # The remote key should be the full S3 key including the prefix
+            if self.sync_handler.prefix:
+                # Remove trailing slash from prefix and leading slash from file_path
+                prefix = self.sync_handler.prefix.rstrip('/')
+                file_path_clean = file_path.lstrip('/')
+                remote_key = f"{prefix}/{file_path_clean}"
+            else:
+                remote_key = file_path.lstrip('/')
+            
             local_path = self.sync_handler.local_root / file_path
             
             success = self.sync_handler._download_file(remote_key, local_path)
