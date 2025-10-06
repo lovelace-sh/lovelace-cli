@@ -2,6 +2,8 @@ import json
 import logging
 import time
 import threading
+import ssl
+import certifi
 from typing import Dict, Optional, Callable
 from datetime import datetime, timedelta
 import websocket
@@ -222,6 +224,10 @@ class WebSocketWatcher:
     def _run_websocket(self):
         """Run the WebSocket connection with proper error handling"""
         try:
+            # Configure SSL context with proper certificate verification
+            ssl_context = ssl.create_default_context()
+            ssl_context.load_verify_locations(certifi.where())
+            
             # Use run_forever with ping_interval and ping_timeout for better connection handling
             # Also include origin and host headers for proper WebSocket upgrade
             self.ws_app.run_forever(
@@ -229,8 +235,19 @@ class WebSocketWatcher:
                 ping_timeout=10,
                 ping_payload='{"type": "ping"}',
                 origin=None,  # Let the library handle origin
-                host=None     # Let the library handle host
+                host=None,    # Let the library handle host
+                sslopt={"context": ssl_context}  # Use proper SSL context
             )
+        except ssl.SSLError as ssl_error:
+            logger.error(f"SSL certificate verification failed: {ssl_error}")
+            logger.info("This is likely due to missing or outdated CA certificates on Unix systems.")
+            logger.info("Please ensure your system's CA certificates are up-to-date or install certifi package.")
+            if self.running:
+                # Attempt to reconnect if we're still supposed to be running
+                logger.info("Attempting to reconnect...")
+                time.sleep(self.reconnect_delay)
+                if self.running:
+                    self._connect()
         except Exception as e:
             logger.error(f"WebSocket connection error: {e}")
             if self.running:

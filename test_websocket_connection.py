@@ -7,6 +7,8 @@ Tests WebSocket connection stability using ping/pong messages
 import json
 import time
 import threading
+import ssl
+import certifi
 import websocket
 from websocket import WebSocketApp
 from datetime import datetime
@@ -216,8 +218,12 @@ class WebSocketPingTester:
         )
         
         try:
-            # Run the test for specified duration
-            self.ws.run_forever()
+            # Configure SSL context with proper certificate verification
+            ssl_context = ssl.create_default_context()
+            ssl_context.load_verify_locations(certifi.where())
+            
+            # Run the test for specified duration with SSL configuration
+            self.ws.run_forever(sslopt={"context": ssl_context})
         except KeyboardInterrupt:
             self.log("Test interrupted by user")
         except Exception as e:
