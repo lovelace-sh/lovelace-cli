@@ -5,10 +5,13 @@ import threading
 import ssl
 import certifi
 import click
-from typing import Dict, Optional, Callable
+from typing import Dict, Optional, Callable, Set
 from datetime import datetime, timedelta
+from pathlib import Path
 import websocket
 from websocket import WebSocketApp
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler, FileSystemEvent
 from .sync import R2Sync
 
 logger = logging.getLogger(__name__)
@@ -16,12 +19,126 @@ logger = logging.getLogger(__name__)
 class WatchError(Exception):
     pass
 
+class LocalFileHandler(FileSystemEventHandler):
+    def __init__(self, sync_handler: R2Sync, websocket_watcher: 'WebSocketWatcher', two_way: bool = False):
+        self.sync_handler = sync_handler
+        self.websocket_watcher = websocket_watcher
+        self.two_way = two_way
+        self.pending_changes: Set[str] = set()
+        self.debounce_delay = 0.5
+        self.last_change_time = {}
+        
+    def _should_ignore(self, path: str) -> bool:
+        path_obj = Path(path)
+        
+        # Ignore .lovelace config file
+        if path_obj.name == '.lovelace':
+            return True
+        
+        # Ignore hidden files and directories
+        for part in path_obj.parts:
+            if part.startswith('.'):
+                return True
+        
+        # Ignore temporary files
+        if path_obj.suffix in ['.tmp', '.swp', '.swx']:
+            return True
+            
+        return False
+    
+    def _get_relative_path(self, path: str) -> str:
+        path_obj = Path(path)
+        try:
+            return str(path_obj.relative_to(self.sync_handler.local_root))
+        except ValueError:
+            return path
+    
+    def _get_remote_key(self, relative_path: str) -> str:
+        if self.sync_handler.prefix:
+            return f"{self.sync_handler.prefix.rstrip('/')}/{relative_path}"
+        return relative_path
+    
+    def _handle_change(self, event: FileSystemEvent, event_type: str):
+        if not self.two_way:
+            return
+            
+        if self._should_ignore(event.src_path):
+            return
+        
+        relative_path = self._get_relative_path(event.src_path)
+        
+        # Debounce rapid changes
+        current_time = time.time()
+        last_time = self.last_change_time.get(relative_path, 0)
+        
+        if current_time - last_time < self.debounce_delay:
+            return
+        
+        self.last_change_time[relative_path] = current_time
+        
+        try:
+            if event_type in ['created', 'modified']:
+                # Upload the file
+                local_path = Path(event.src_path)
+                if local_path.is_file():
+                    remote_key = self._get_remote_key(relative_path)
+                    
+                    old_show_progress = self.sync_handler.show_progress
+                    self.sync_handler.show_progress = False
+                    success = self.sync_handler._upload_file(local_path, remote_key)
+                    self.sync_handler.show_progress = old_show_progress
+                    
+                    if success:
+                        action = "Created" if event_type == "created" else "Updated"
+                        click.echo(f"  ↑ {action} {relative_path}")
+                        
+                        # Notify server via WebSocket
+                        if self.websocket_watcher.ws_app and self.websocket_watcher.ws_app.sock:
+                            message = json.dumps({
+                                "type": "local_change",
+                                "path": relative_path,
+                                "event": event_type
+                            })
+                            self.websocket_watcher.ws_app.send(message)
+                            
+            elif event_type == 'deleted':
+                # Delete from remote
+                remote_key = self._get_remote_key(relative_path)
+                
+                if self.sync_handler._delete_remote_file(remote_key):
+                    click.echo(f"  ↑ Deleted {relative_path}")
+                    
+                    # Notify server via WebSocket
+                    if self.websocket_watcher.ws_app and self.websocket_watcher.ws_app.sock:
+                        message = json.dumps({
+                            "type": "local_change",
+                            "path": relative_path,
+                            "event": "deleted"
+                        })
+                        self.websocket_watcher.ws_app.send(message)
+                        
+        except Exception as e:
+            logger.error(f"Error handling local change for {relative_path}: {e}")
+    
+    def on_created(self, event):
+        if not event.is_directory:
+            self._handle_change(event, 'created')
+    
+    def on_modified(self, event):
+        if not event.is_directory:
+            self._handle_change(event, 'modified')
+    
+    def on_deleted(self, event):
+        if not event.is_directory:
+            self._handle_change(event, 'deleted')
+
 class WebSocketWatcher:
-    def __init__(self, config: Dict[str, str], sync_handler: R2Sync):
+    def __init__(self, config: Dict[str, str], sync_handler: R2Sync, two_way: bool = False):
         self.websocket_url = config.get("websocket_url")
         self.token = config.get("token")
         self.project_id = config.get("project_id")
         self.sync_handler = sync_handler
+        self.two_way = two_way
         self.ws_app: Optional[WebSocketApp] = None
         self.running = False
         self.reconnect_delay = 5
@@ -29,6 +146,8 @@ class WebSocketWatcher:
         self.last_activity = datetime.now()
         self.hibernation_timeout = 30
         self.ping_interval = 25
+        self.file_observer: Optional[Observer] = None
+        self.file_handler: Optional[LocalFileHandler] = None
         
     def _on_open(self, ws):
         self.reconnect_delay = 5
@@ -259,18 +378,43 @@ class WebSocketWatcher:
 
         try:
             # Enable progress output for initial sync
-            downloaded, updated, deleted = self.sync_handler.sync()
+            downloaded, updated, deleted, uploaded = self.sync_handler.sync(two_way=self.two_way)
 
             # Show summary if there were any changes
-            if downloaded or updated or deleted:
-                click.echo(f"\nInitial sync complete: {len(downloaded)} new, {len(updated)} updated, {len(deleted)} deleted")
+            if self.two_way:
+                if uploaded or deleted:
+                    click.echo(f"\nInitial sync complete: {len(uploaded)} uploaded, {len(deleted)} deleted from remote")
+            else:
+                if downloaded or updated or deleted:
+                    click.echo(f"\nInitial sync complete: {len(downloaded)} new, {len(updated)} updated, {len(deleted)} deleted")
         except Exception as e:
             logger.error(f"Initial sync failed: {e}")
+
+        # Start local file watching if two-way sync is enabled
+        if self.two_way:
+            try:
+                self.file_handler = LocalFileHandler(self.sync_handler, self, self.two_way)
+                self.file_observer = Observer()
+                self.file_observer.schedule(
+                    self.file_handler,
+                    str(self.sync_handler.local_root),
+                    recursive=True
+                )
+                self.file_observer.start()
+                click.echo("Two-way sync enabled - watching for local changes")
+            except Exception as e:
+                logger.error(f"Failed to start file observer: {e}")
 
         self._connect()
 
     def stop(self):
         self.running = False
+
+        # Stop file observer
+        if self.file_observer:
+            self.file_observer.stop()
+            self.file_observer.join()
+            self.file_observer = None
 
         if self.ws_app:
             self.ws_app.close()

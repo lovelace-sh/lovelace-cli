@@ -137,7 +137,37 @@ class R2Sync:
         # Hashes differ, so we need to update
         return True
     
-    def sync(self, dry_run: bool = False) -> Tuple[List[str], List[str], List[str]]:
+    def _upload_file(self, local_path: Path, remote_key: str) -> bool:
+        try:
+            self.s3_client.upload_file(
+                str(local_path),
+                self.bucket_name,
+                remote_key
+            )
+            
+            if self.show_progress and local_path.name != '.gitkeep':
+                click.echo(f"  ✓ Uploaded {local_path.relative_to(self.local_root)}")
+            return True
+
+        except ClientError as e:
+            logger.error(f"Failed to upload {local_path}: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Unexpected error uploading {local_path}: {e}")
+            return False
+    
+    def _delete_remote_file(self, remote_key: str) -> bool:
+        try:
+            self.s3_client.delete_object(
+                Bucket=self.bucket_name,
+                Key=remote_key
+            )
+            return True
+        except ClientError as e:
+            logger.error(f"Failed to delete remote file {remote_key}: {e}")
+            return False
+    
+    def sync(self, dry_run: bool = False, two_way: bool = False) -> Tuple[List[str], List[str], List[str], List[str]]:
         
         remote_files = self._get_remote_files()
         local_files = self._get_local_files()
@@ -145,62 +175,111 @@ class R2Sync:
         files_to_download = []
         files_to_update = []
         files_to_delete = []
+        files_to_upload = []
         
         for remote_path, remote_info in remote_files.items():
             local_path = self.local_root / remote_path
             
             if remote_path not in local_files:
-                files_to_download.append((remote_path, local_path, remote_info['key']))
+                if two_way:
+                    # In two-way mode, remote files not in local should be deleted from remote
+                    files_to_delete.append(remote_info['key'])
+                else:
+                    # In one-way mode, download missing files
+                    files_to_download.append((remote_path, local_path, remote_info['key']))
             else:
                 local_info = local_files[remote_path]
                 if self._should_update_file(local_info, remote_info):
-                    files_to_update.append((remote_path, local_path, remote_info['key']))
+                    if two_way:
+                        # In two-way mode, prefer local version (upload to remote)
+                        remote_key = remote_info['key']
+                        files_to_upload.append((remote_path, local_info['path'], remote_key))
+                    else:
+                        # In one-way mode, download from remote
+                        files_to_update.append((remote_path, local_path, remote_info['key']))
         
-        for local_path in local_files:
-            if local_path not in remote_files:
-                files_to_delete.append(local_files[local_path]['path'])
+        if two_way:
+            # Upload local files that don't exist on remote
+            for local_path, local_info in local_files.items():
+                if local_path not in remote_files:
+                    # Construct remote key with prefix
+                    if self.prefix:
+                        remote_key = f"{self.prefix.rstrip('/')}/{local_path}"
+                    else:
+                        remote_key = local_path
+                    files_to_upload.append((local_path, local_info['path'], remote_key))
+        else:
+            # In one-way mode, delete local files not on remote
+            for local_path in local_files:
+                if local_path not in remote_files:
+                    files_to_delete.append(local_files[local_path]['path'])
         
         if dry_run:
-            return (
-                [f[0] for f in files_to_download],
-                [f[0] for f in files_to_update],
-                [str(f) for f in files_to_delete]
-            )
+            if two_way:
+                return (
+                    [],  # No downloads in two-way
+                    [],  # No updates in two-way
+                    [str(f) if isinstance(f, Path) else f for f in files_to_delete],
+                    [f[0] for f in files_to_upload]
+                )
+            else:
+                return (
+                    [f[0] for f in files_to_download],
+                    [f[0] for f in files_to_update],
+                    [str(f) for f in files_to_delete],
+                    []  # No uploads in one-way
+                )
         
         downloaded = []
         for remote_path, local_path, remote_key in files_to_download:
             if self._download_file(remote_key, local_path):
-                # Don't count .gitkeep files in the results
                 if local_path.name != '.gitkeep':
                     downloaded.append(remote_path)
 
         updated = []
         for remote_path, local_path, remote_key in files_to_update:
             if self._download_file(remote_key, local_path):
-                # Don't count .gitkeep files in the results
                 if local_path.name != '.gitkeep':
                     updated.append(remote_path)
 
-        deleted = []
-        for file_path in files_to_delete:
-            try:
-                file_path.unlink()
-                if self.show_progress and file_path.name != '.gitkeep':
-                    click.echo(f"  ✓ Deleted {file_path.relative_to(self.local_root)}")
-                # Don't count .gitkeep files in the results
+        uploaded = []
+        for local_path, file_path, remote_key in files_to_upload:
+            if self._upload_file(file_path, remote_key):
                 if file_path.name != '.gitkeep':
-                    deleted.append(str(file_path))
+                    uploaded.append(local_path)
 
-                parent = file_path.parent
-                while parent != self.local_root:
-                    try:
-                        if not any(parent.iterdir()):
-                            parent.rmdir()
-                    except:
-                        break
-                    parent = parent.parent
+        deleted = []
+        if two_way:
+            # Delete remote files
+            for remote_key in files_to_delete:
+                if self._delete_remote_file(remote_key):
+                    relative_path = remote_key
+                    if self.prefix and remote_key.startswith(self.prefix):
+                        relative_path = remote_key[len(self.prefix):].lstrip('/')
+                    if self.show_progress and not relative_path.endswith('.gitkeep'):
+                        click.echo(f"  ✓ Deleted remote {relative_path}")
+                    if not relative_path.endswith('.gitkeep'):
+                        deleted.append(relative_path)
+        else:
+            # Delete local files
+            for file_path in files_to_delete:
+                try:
+                    file_path.unlink()
+                    if self.show_progress and file_path.name != '.gitkeep':
+                        click.echo(f"  ✓ Deleted {file_path.relative_to(self.local_root)}")
+                    if file_path.name != '.gitkeep':
+                        deleted.append(str(file_path))
 
-            except Exception as e:
-                logger.error(f"Failed to delete {file_path}: {e}")
+                    parent = file_path.parent
+                    while parent != self.local_root:
+                        try:
+                            if not any(parent.iterdir()):
+                                parent.rmdir()
+                        except:
+                            break
+                        parent = parent.parent
+
+                except Exception as e:
+                    logger.error(f"Failed to delete {file_path}: {e}")
         
-        return downloaded, updated, deleted
+        return downloaded, updated, deleted, uploaded
