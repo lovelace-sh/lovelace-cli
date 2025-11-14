@@ -109,14 +109,14 @@ class R2Sync:
     def _download_file(self, remote_key: str, local_path: Path) -> bool:
         try:
             local_path.parent.mkdir(parents=True, exist_ok=True)
-            
+
             temp_path = local_path.with_suffix('.tmp')
             self.s3_client.download_file(
                 self.bucket_name,
                 remote_key,
                 str(temp_path)
             )
-            
+
             temp_path.replace(local_path)
             if self.show_progress and local_path.name != '.gitkeep':
                 click.echo(f"  ✓ {local_path.relative_to(self.local_root)}")
@@ -127,6 +127,54 @@ class R2Sync:
             return False
         except Exception as e:
             logger.error(f"Unexpected error downloading {remote_key}: {e}")
+            return False
+
+    def _upload_file(self, local_path: Path, remote_key: str) -> bool:
+        """Upload a local file to R2 storage"""
+        try:
+            if not local_path.exists():
+                logger.debug(f"Local file does not exist: {local_path}")
+                return False
+
+            self.s3_client.upload_file(
+                str(local_path),
+                self.bucket_name,
+                remote_key
+            )
+
+            if self.show_progress and local_path.name != '.gitkeep':
+                click.echo(f"  ✓ Uploaded {local_path.relative_to(self.local_root)}")
+            return True
+
+        except ClientError as e:
+            logger.error(f"Failed to upload {remote_key}: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Unexpected error uploading {remote_key}: {e}")
+            return False
+
+    def _delete_remote_file(self, remote_key: str) -> bool:
+        """Delete a file from R2 storage"""
+        try:
+            self.s3_client.delete_object(
+                Bucket=self.bucket_name,
+                Key=remote_key
+            )
+
+            if self.show_progress:
+                # Extract relative path from remote key
+                if self.prefix:
+                    relative_path = remote_key[len(self.prefix):].lstrip('/')
+                else:
+                    relative_path = remote_key
+                click.echo(f"  ✓ Deleted from remote: {relative_path}")
+            return True
+
+        except ClientError as e:
+            logger.error(f"Failed to delete {remote_key}: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Unexpected error deleting {remote_key}: {e}")
             return False
     
     def _should_update_file(self, local_info: Dict, remote_info: Dict) -> bool:
