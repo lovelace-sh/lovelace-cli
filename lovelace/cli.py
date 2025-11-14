@@ -148,9 +148,8 @@ def init():
 
 @cli.command()
 @click.option('--dry-run', is_flag=True, help='Show what would be synced without making changes')
-@click.option('--two-way', is_flag=True, help='Enable two-way sync (upload local changes to remote)')
-def sync(dry_run, two_way):
-    """Sync files from R2 to local directory"""
+def sync(dry_run):
+    """One-way sync: Download files from R2 to local directory"""
     
     config_manager = ConfigManager()
     
@@ -161,32 +160,20 @@ def sync(dry_run, two_way):
     try:
         config = config_manager.load()
 
-        if two_way:
-            click.echo("Syncing (two-way)...")
-        else:
-            click.echo("Syncing...")
+        click.echo("Syncing (one-way: remote → local)...")
 
         syncer = R2Sync(config)
 
-        downloaded, updated, deleted, uploaded = syncer.sync(dry_run=dry_run, two_way=two_way)
+        downloaded, updated, deleted, uploaded = syncer.sync(dry_run=dry_run, two_way=False)
 
         # Show summary
-        if two_way:
-            if uploaded or deleted:
-                if dry_run:
-                    click.echo(f"\nDry run complete: {len(uploaded)} to upload, {len(deleted)} to delete from remote")
-                else:
-                    click.echo(f"\nSync complete: {len(uploaded)} uploaded, {len(deleted)} deleted from remote")
+        if downloaded or updated or deleted:
+            if dry_run:
+                click.echo(f"\nDry run complete: {len(downloaded)} new, {len(updated)} updated, {len(deleted)} deleted")
             else:
-                click.echo("\nNo changes needed")
+                click.echo(f"\nSync complete: {len(downloaded)} new, {len(updated)} updated, {len(deleted)} deleted")
         else:
-            if downloaded or updated or deleted:
-                if dry_run:
-                    click.echo(f"\nDry run complete: {len(downloaded)} new, {len(updated)} updated, {len(deleted)} deleted")
-                else:
-                    click.echo(f"\nSync complete: {len(downloaded)} new, {len(updated)} updated, {len(deleted)} deleted")
-            else:
-                click.echo("\nNo changes needed")
+            click.echo("\nNo changes needed")
         
     except ConfigError as e:
         click.echo(f"Configuration error: {e}", err=True)
@@ -199,9 +186,8 @@ def sync(dry_run, two_way):
         sys.exit(1)
 
 @cli.command()
-@click.option('--two-way', is_flag=True, help='Enable two-way sync (upload local changes to remote)')
-def watch(two_way):
-    """Watch for changes and sync automatically"""
+def watch():
+    """Two-way sync: Watch for changes and sync automatically (bidirectional)"""
     
     config_manager = ConfigManager()
     
@@ -212,14 +198,11 @@ def watch(two_way):
     try:
         config = config_manager.load()
 
-        if two_way:
-            click.echo("Starting live sync (two-way)...")
-        else:
-            click.echo("Starting live sync...")
+        click.echo("Starting live sync (two-way: local ↔ remote)...")
         click.echo("Press Ctrl+C to stop")
         
         syncer = R2Sync(config)
-        watcher = WebSocketWatcher(config, syncer, two_way=two_way)
+        watcher = WebSocketWatcher(config, syncer, two_way=True)
         
         def signal_handler(sig, frame):
             click.echo("\nStopping watcher...")
